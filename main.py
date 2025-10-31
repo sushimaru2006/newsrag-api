@@ -4,12 +4,25 @@ import requests
 import os
 from dotenv import load_dotenv
 from datetime import datetime
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 # 環境変数ロード
 load_dotenv()
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 
 app = FastAPI(title="NewsRAG Backend (GNews Version)")
+
+# --- Firebase 初期化 ---
+cred_path = os.getenv("FIREBASE_CREDENTIALS")
+if not firebase_admin._apps:
+    if cred_path and os.path.exists(cred_path):
+        cred = credentials.Certificate(cred_path)
+        firebase_admin.initialize_app(cred)
+    else:
+        raise RuntimeError("Firebase credentials file not found.")
+
+db = firestore.client()
 
 # --- Pydantic モデル ---
 class NewsRequest(BaseModel):
@@ -19,7 +32,7 @@ class NewsRequest(BaseModel):
 @app.post("/update-news")
 def update_news(req: NewsRequest):
     """
-    GNews APIからカテゴリ別ニュースを取得
+    GNews APIからカテゴリ別ニュースを取得し、Firestoreに保存
     """
     if not GNEWS_API_KEY:
         raise HTTPException(status_code=500, detail="GNEWS_API_KEY not found")
@@ -36,13 +49,15 @@ def update_news(req: NewsRequest):
             "apikey": GNEWS_API_KEY,
         }
 
-        response = requests.get(base_url, params=params)
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+        res = requests.get(base_url, params=params)
+        if res.status_code != 200:
+            raise HTTPException(status_code=res.status_code, detail=res.text)
 
-        data = response.json()
+        data = res.json()
+
         for article in data.get("articles", []):
-            news = {
+            # --- Firestore登録用オブジェクト ---
+            article_obj = {
                 "title": article.get("title"),
                 "description": article.get("description"),
                 "content": article.get("content"),
@@ -53,7 +68,12 @@ def update_news(req: NewsRequest):
                 "category": category,
                 "retrievedAt": datetime.utcnow().isoformat(),
             }
-            all_articles.append(news)
+
+            # --- Firestoreに保存（URLをドキュメントIDに） ---
+            if article_obj["url"]:
+                doc_id = article_obj["url"].replace("/", "_")
+                db.collection("news").document(doc_id).set(article_obj)
+                all_articles.append(article_obj)
 
     return {
         "status": "success",
